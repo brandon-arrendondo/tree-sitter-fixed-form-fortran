@@ -310,9 +310,25 @@ static bool scan_end_of_statement(Scanner *scanner, TSLexer *lexer,
     // continuation of the current statement; in that case skip the newline
     // and emit LINE_CONTINUATION instead of END_OF_STATEMENT.
     if (lexer->lookahead == '\r' || lexer->lookahead == '\n') {
+        // A bare blank line inside a labeled DO loop nest (scanner->depth > 0)
+        // can produce a spurious EOS that makes the deeply nested grammar state
+        // unrecoverable.  Suppress it: let the \n fall through to the
+        // while(iswspace) loop in scan() which consumes it transparently.
+        // At depth == 0 (subroutine / module scope) the GLR can absorb the
+        // extra EOS, so we only suppress inside active DO loops.
+        if (lexer->get_column(lexer) == 0 && scanner->depth > 0) {
+            return false;
+        }
+
         // Skip past the newline (not included in any token)
         if (lexer->lookahead == '\r') skip(lexer);
         if (lexer->lookahead == '\n') skip(lexer);
+
+        // Commit the EOS token to end right after the newline.
+        // Subsequent advances are "peeking" — they do not move the boundary
+        // for the EOS token, so the label area (columns 0-4) is left for the
+        // next scan call (e.g. the DO_LABEL scanner).
+        lexer->mark_end(lexer);
 
         // First character of the next line
         int32_t first = lexer->lookahead;
@@ -321,19 +337,22 @@ static bool scan_end_of_statement(Scanner *scanner, TSLexer *lexer,
         bool is_comment = (first == '*' || first == 'C' || first == 'c');
         bool is_eol = (first == '\n' || first == '\r');
         if (!is_comment && !is_eol && !lexer->eof(lexer)) {
-            // Advance through the label area (columns 0-4)
+            // Peek through the label area (columns 0-4).  Using advance (not
+            // skip) so tree-sitter knows these bytes were inspected, but the
+            // mark_end above keeps them out of the EOS token range.
             while (!lexer->eof(lexer) &&
                    lexer->get_column(lexer) < 5 &&
                    lexer->lookahead != '\n' && lexer->lookahead != '\r') {
-                skip(lexer);
+                advance(lexer);
             }
             // Check column 5 for a fixed-form continuation character
             if (lexer->get_column(lexer) == 5 && !lexer->eof(lexer)) {
                 int32_t c = lexer->lookahead;
                 bool is_cont = (c != ' ' && c != '0' &&
                                 c != '\n' && c != '\r');
-                if (is_cont && valid_symbols[LINE_CONTINUATION]) {
+                if (is_cont) {
                     advance(lexer); // consume the continuation char
+                    lexer->mark_end(lexer); // extend token boundary to include it
                     lexer->result_symbol = LINE_CONTINUATION;
                     return true;
                 }
