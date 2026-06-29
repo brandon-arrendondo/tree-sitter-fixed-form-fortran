@@ -17,6 +17,7 @@ enum TokenType {
     DO_LABEL,
     DO_LABEL_VIRTUAL,
     DO_LABEL_CONTINUE,
+    FIXED_FORM_COMMENT,
 };
 
 // at most 100 nested labeled do loops, should be sufficient
@@ -575,7 +576,36 @@ static bool scan_label_number_boz(Scanner *scanner, TSLexer *lexer, const bool *
     return false;
 }
 
+// Fixed-form Fortran (*.f, *.for, *.f77) treats a line as a comment when the
+// first character is *, C, or c (column 0 in tree-sitter's 0-indexed terms).
+// The grammar has no way to express a column-position constraint in a regex,
+// so this must be handled externally.  We consume to end-of-line and emit
+// fixed_form_comment so tree-sitter skips the line entirely.
+static bool scan_fixed_form_comment(TSLexer *lexer) {
+    if (lexer->get_column(lexer) != 0) {
+        return false;
+    }
+    int32_t c = lexer->lookahead;
+    if (c != '*' && c != 'C' && c != 'c') {
+        return false;
+    }
+    while (lexer->lookahead != '\n' && lexer->lookahead != '\r' &&
+           !lexer->eof(lexer)) {
+        advance(lexer);
+    }
+    lexer->result_symbol = FIXED_FORM_COMMENT;
+    return true;
+}
+
 static bool scan(Scanner *scanner, TSLexer *lexer, const bool *valid_symbols) {
+    // Fixed-form comment lines (*, C, c at column 0) must be checked before
+    // any whitespace is consumed, since get_column() is only reliable here.
+    if (valid_symbols[FIXED_FORM_COMMENT]) {
+        if (scan_fixed_form_comment(lexer)) {
+            return true;
+        }
+    }
+
     // handle pending virtual labels and eos first
     if (valid_symbols[END_OF_STATEMENT]) {
         if (scan_do_label_eos(scanner, lexer)) {
