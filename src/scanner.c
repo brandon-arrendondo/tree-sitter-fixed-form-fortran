@@ -276,7 +276,8 @@ static bool scan_hollerith_constant(TSLexer *lexer) {
     return true;
 }
 
-static bool scan_end_of_statement(Scanner *scanner, TSLexer *lexer) {
+static bool scan_end_of_statement(Scanner *scanner, TSLexer *lexer,
+                                   const bool *valid_symbols) {
     // Things that end statements in Fortran:
     //
     // - semicolons
@@ -301,20 +302,49 @@ static bool scan_end_of_statement(Scanner *scanner, TSLexer *lexer) {
 
     // Consume end of line characters, we allow '\n', '\r\n' and
     // '\r' to cover unix, MSDOS and old style Macintosh.
-    // Handle comments here too, but don't consume them
-    if (lexer->lookahead == '\r') {
-        skip(lexer);
-        if (lexer->lookahead == '\n') {
-            skip(lexer);
+    // Handle comments here too, but don't consume them.
+    //
+    // Fixed-form extension: before emitting EOS for a newline, peek at the
+    // next line to check for a continuation character at column 5 (0-indexed).
+    // A non-space, non-'0' character in column 5 makes the next line a
+    // continuation of the current statement; in that case skip the newline
+    // and emit LINE_CONTINUATION instead of END_OF_STATEMENT.
+    if (lexer->lookahead == '\r' || lexer->lookahead == '\n') {
+        // Skip past the newline (not included in any token)
+        if (lexer->lookahead == '\r') skip(lexer);
+        if (lexer->lookahead == '\n') skip(lexer);
+
+        // First character of the next line
+        int32_t first = lexer->lookahead;
+
+        // Comment line, blank line, or EOF → not a continuation → EOS
+        bool is_comment = (first == '*' || first == 'C' || first == 'c');
+        bool is_eol = (first == '\n' || first == '\r');
+        if (!is_comment && !is_eol && !lexer->eof(lexer)) {
+            // Advance through the label area (columns 0-4)
+            while (!lexer->eof(lexer) &&
+                   lexer->get_column(lexer) < 5 &&
+                   lexer->lookahead != '\n' && lexer->lookahead != '\r') {
+                skip(lexer);
+            }
+            // Check column 5 for a fixed-form continuation character
+            if (lexer->get_column(lexer) == 5 && !lexer->eof(lexer)) {
+                int32_t c = lexer->lookahead;
+                bool is_cont = (c != ' ' && c != '0' &&
+                                c != '\n' && c != '\r');
+                if (is_cont && valid_symbols[LINE_CONTINUATION]) {
+                    advance(lexer); // consume the continuation char
+                    lexer->result_symbol = LINE_CONTINUATION;
+                    return true;
+                }
+            }
         }
-    } else {
-        if (lexer->lookahead == '\n') {
-            skip(lexer);
-        } else if (lexer->lookahead != '!') {
-            // Not a newline and not a comment, so not an
-            // end-of-statement
-            return false;
-        }
+
+        lexer->result_symbol = END_OF_STATEMENT;
+        return true;
+    } else if (lexer->lookahead != '!') {
+        // Not a newline and not a comment, so not an end-of-statement
+        return false;
     }
 
     lexer->result_symbol = END_OF_STATEMENT;
@@ -322,15 +352,28 @@ static bool scan_end_of_statement(Scanner *scanner, TSLexer *lexer) {
 }
 
 static bool scan_start_line_continuation(Scanner *scanner, TSLexer *lexer) {
-    // Now see if we should start a line continuation
+    // Free-form continuation: & at end of line
     scanner->in_line_continuation = (lexer->lookahead == '&');
-    if (!scanner->in_line_continuation) {
-        return false;
+    if (scanner->in_line_continuation) {
+        advance(lexer);
+        lexer->result_symbol = LINE_CONTINUATION;
+        return true;
     }
-    // Consume the '&'
-    advance(lexer);
-    lexer->result_symbol = LINE_CONTINUATION;
-    return true;
+
+    // Fixed-form continuation: any non-space, non-'0' character at column 5
+    // (0-indexed), reached after the whitespace loop consumed \n and the label
+    // area.  This path is a safety net; the primary detection happens inside
+    // scan_end_of_statement so that EOS is suppressed cleanly.
+    if (lexer->get_column(lexer) == 5) {
+        int32_t c = lexer->lookahead;
+        if (c != ' ' && c != '0' && c != '\n' && c != '\r' && !lexer->eof(lexer)) {
+            advance(lexer);
+            lexer->result_symbol = LINE_CONTINUATION;
+            return true;
+        }
+    }
+
+    return false;
 }
 
 static bool scan_end_line_continuation(Scanner *scanner, TSLexer *lexer) {
@@ -635,9 +678,10 @@ static bool scan(Scanner *scanner, TSLexer *lexer, const bool *valid_symbols) {
         skip(lexer);
     }
 
-    // Close the current statement if we can
+    // Close the current statement if we can.  scan_end_of_statement may emit
+    // LINE_CONTINUATION instead when the next line has a column-5 continuation.
     if (valid_symbols[END_OF_STATEMENT]) {
-        if (scan_end_of_statement(scanner, lexer)) {
+        if (scan_end_of_statement(scanner, lexer, valid_symbols)) {
             return true;
         }
     }
