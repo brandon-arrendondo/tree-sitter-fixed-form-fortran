@@ -589,8 +589,19 @@ static bool scan_fixed_form_comment(TSLexer *lexer) {
     if (c != '*' && c != 'C' && c != 'c') {
         return false;
     }
+    // Consume to end of line, including the trailing newline so that the
+    // EOS scanner never fires on the newline after a comment.  Without this,
+    // each comment line emits a spurious END_OF_STATEMENT token that the
+    // grammar can't absorb when several comment lines appear in sequence.
     while (lexer->lookahead != '\n' && lexer->lookahead != '\r' &&
            !lexer->eof(lexer)) {
+        advance(lexer);
+    }
+    // Consume the newline itself (handle \r\n, \r, \n).
+    if (lexer->lookahead == '\r') {
+        advance(lexer);
+    }
+    if (lexer->lookahead == '\n') {
         advance(lexer);
     }
     lexer->result_symbol = FIXED_FORM_COMMENT;
